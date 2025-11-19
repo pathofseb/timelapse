@@ -336,12 +336,12 @@ public class MainActivity extends AppCompatActivity {
             isRecording = true;
             recordButton.setText(getString(R.string.stop_recording));
             recordButton.setBackgroundTintList(ContextCompat.getColorStateList(this, android.R.color.holo_green_dark));
-            statusText.setText("Recording at " + speedMultiplier + "x speed - " + RESOLUTIONS[selectedResolutionIndex] + "\nTouch to brighten • Power button to sleep");
+            statusText.setText("Recording at " + speedMultiplier + "x speed - " + RESOLUTIONS[selectedResolutionIndex] + "\nScreen will sleep • Power button to wake");
             speedSeekBar.setEnabled(false);
             zoomSeekBar.setEnabled(false);
 
-            // Schedule screen dimming after 10 seconds
-            scheduleDimming();
+            // Allow screen to turn off while recording (wake lock keeps CPU running)
+            getWindow().clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
         } else {
             Toast.makeText(this, "Failed to start recording", Toast.LENGTH_SHORT).show();
         }
@@ -371,9 +371,8 @@ public class MainActivity extends AppCompatActivity {
                     speedSeekBar.setEnabled(true);
                     zoomSeekBar.setEnabled(true);
 
-                    // Restore screen brightness
-                    restoreScreenBrightness();
-                    screenIsDimmed = false;
+                    // Keep screen on again when not recording
+                    getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
                 });
             }
 
@@ -385,9 +384,8 @@ public class MainActivity extends AppCompatActivity {
                     speedSeekBar.setEnabled(true);
                     zoomSeekBar.setEnabled(true);
 
-                    // Restore screen brightness
-                    restoreScreenBrightness();
-                    screenIsDimmed = false;
+                    // Keep screen on again when not recording
+                    getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
                 });
             }
         });
