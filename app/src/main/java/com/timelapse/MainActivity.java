@@ -88,12 +88,14 @@ public class MainActivity extends AppCompatActivity {
     // Resolution settings
     private SharedPreferences preferences;
     private static final String PREF_RESOLUTION = "video_resolution";
+    private static final String PREF_TIMESTAMP = "show_timestamp";
     private static final String[] RESOLUTIONS = {"720p", "1080p", "1440p", "4K"};
     private static final int[] RESOLUTION_HEIGHTS = {720, 1080, 1440, 2160};
     private int selectedResolutionIndex = 1; // Default to 1080p
+    private boolean showTimestamp = false;
 
     // Zoom
-    private float currentZoom = 1.0f;
+    private float currentZoom = 5.0f; // Default to 5x zoom
     private ScaleGestureDetector scaleGestureDetector;
 
     private final Runnable dimScreenRunnable = new Runnable() {
@@ -137,6 +139,7 @@ public class MainActivity extends AppCompatActivity {
         // Initialize SharedPreferences
         preferences = getSharedPreferences("TimeLapsePrefs", Context.MODE_PRIVATE);
         selectedResolutionIndex = preferences.getInt(PREF_RESOLUTION, 1); // Default to 1080p
+        showTimestamp = preferences.getBoolean(PREF_TIMESTAMP, false);
 
         // Initialize UI elements
         viewFinder = findViewById(R.id.viewFinder);
@@ -152,6 +155,11 @@ public class MainActivity extends AppCompatActivity {
 
         // Set initial resolution text
         resolutionText.setText(RESOLUTIONS[selectedResolutionIndex]);
+
+        // Set initial zoom to 5x
+        int initialZoomProgress = 44; // Maps to 5x zoom (1.0 + (44/100)*9 = 5.0)
+        zoomSeekBar.setProgress(initialZoomProgress);
+        zoomText.setText(String.format("%.1fx", currentZoom));
 
         recordButton.setOnClickListener(v -> toggleRecording());
 
@@ -196,7 +204,7 @@ public class MainActivity extends AppCompatActivity {
         zoomSeekBar.setOnSeekBarChangeListener(new SeekBar.OnSeekBarChangeListener() {
             @Override
             public void onProgressChanged(SeekBar seekBar, int progress, boolean fromUser) {
-                if (fromUser && cameraControl != null) {
+                if (cameraControl != null) {
                     // Map 0-100 to 1.0-10.0x zoom
                     currentZoom = 1.0f + (progress / 100f) * 9.0f;
                     cameraControl.setLinearZoom(progress / 100f);
@@ -281,8 +289,15 @@ public class MainActivity extends AppCompatActivity {
     private void bindPreview(@NonNull ProcessCameraProvider cameraProvider) {
         Preview preview = new Preview.Builder().build();
 
+        // Calculate target resolution for portrait mode (9:16 aspect ratio)
+        // RESOLUTION_HEIGHTS represents the WIDTH in portrait mode
+        int targetWidth = RESOLUTION_HEIGHTS[selectedResolutionIndex];
+        int targetHeight = (targetWidth * 16) / 9;
+        Size targetResolution = new Size(targetWidth, targetHeight);
+
         imageCapture = new ImageCapture.Builder()
                 .setCaptureMode(ImageCapture.CAPTURE_MODE_MINIMIZE_LATENCY)
+                .setTargetResolution(targetResolution)
                 .build();
 
         CameraSelector cameraSelector = CameraSelector.DEFAULT_BACK_CAMERA;
@@ -296,7 +311,11 @@ public class MainActivity extends AppCompatActivity {
         camera = cameraProvider.bindToLifecycle(this, cameraSelector, preview, imageCapture);
         cameraControl = camera.getCameraControl();
 
-        Log.d("MainActivity", "Camera bound at native resolution");
+        // Apply default 5x zoom
+        float linearZoom = (currentZoom - 1.0f) / 9.0f; // Convert 5x to linear scale
+        cameraControl.setLinearZoom(linearZoom);
+
+        Log.d("MainActivity", "Camera bound with target resolution: " + targetWidth + "x" + targetHeight + " (portrait 9:16), zoom: " + currentZoom + "x");
     }
 
     private void toggleRecording() {
@@ -313,7 +332,7 @@ public class MainActivity extends AppCompatActivity {
     }
 
     private void startRecording() {
-        if (imageCapture != null && timeLapseService.startRecording(imageCapture, speedMultiplier)) {
+        if (imageCapture != null && timeLapseService.startRecording(imageCapture, speedMultiplier, showTimestamp)) {
             isRecording = true;
             recordButton.setText(getString(R.string.stop_recording));
             recordButton.setBackgroundTintList(ContextCompat.getColorStateList(this, android.R.color.holo_green_dark));
@@ -418,33 +437,82 @@ public class MainActivity extends AppCompatActivity {
 
     private void showResolutionDialog() {
         if (isRecording) {
-            Toast.makeText(this, "Cannot change resolution while recording", Toast.LENGTH_SHORT).show();
+            Toast.makeText(this, "Cannot change settings while recording", Toast.LENGTH_SHORT).show();
             return;
         }
 
+        // Create a custom layout for the settings dialog
+        android.view.LayoutInflater inflater = getLayoutInflater();
+        android.view.View dialogView = inflater.inflate(android.R.layout.select_dialog_multichoice, null);
+
         AlertDialog.Builder builder = new AlertDialog.Builder(this);
-        builder.setTitle("Select Video Resolution");
-        builder.setSingleChoiceItems(RESOLUTIONS, selectedResolutionIndex, new DialogInterface.OnClickListener() {
+        builder.setTitle("Settings");
+
+        // Create items array with resolution options and timestamp toggle
+        final String[] items = new String[RESOLUTIONS.length + 1];
+        for (int i = 0; i < RESOLUTIONS.length; i++) {
+            items[i] = RESOLUTIONS[i];
+        }
+        items[RESOLUTIONS.length] = "Show Timestamp";
+
+        // Track which items are checked
+        final boolean[] checkedItems = new boolean[items.length];
+        checkedItems[selectedResolutionIndex] = true;
+        checkedItems[RESOLUTIONS.length] = showTimestamp;
+
+        builder.setMultiChoiceItems(items, checkedItems, new DialogInterface.OnMultiChoiceClickListener() {
             @Override
-            public void onClick(DialogInterface dialog, int which) {
-                selectedResolutionIndex = which;
-                resolutionText.setText(RESOLUTIONS[selectedResolutionIndex]);
+            public void onClick(DialogInterface dialog, int which, boolean isChecked) {
+                if (which < RESOLUTIONS.length) {
+                    // Resolution selection - uncheck all other resolutions
+                    for (int i = 0; i < RESOLUTIONS.length; i++) {
+                        checkedItems[i] = (i == which);
+                        ((AlertDialog) dialog).getListView().setItemChecked(i, i == which);
+                    }
+                } else {
+                    // Timestamp toggle
+                    checkedItems[which] = isChecked;
+                }
+            }
+        });
 
-                // Save preference
-                preferences.edit().putInt(PREF_RESOLUTION, selectedResolutionIndex).apply();
+        builder.setPositiveButton("Apply", new DialogInterface.OnClickListener() {
+            @Override
+            public void onClick(DialogInterface dialog, int id) {
+                // Find selected resolution
+                int newResolution = selectedResolutionIndex;
+                for (int i = 0; i < RESOLUTIONS.length; i++) {
+                    if (checkedItems[i]) {
+                        newResolution = i;
+                        break;
+                    }
+                }
 
-                // Restart camera with new resolution
-                if (cameraProvider != null) {
-                    bindPreview(cameraProvider);
+                // Update timestamp setting
+                showTimestamp = checkedItems[RESOLUTIONS.length];
+
+                // Save preferences
+                SharedPreferences.Editor editor = preferences.edit();
+                editor.putInt(PREF_RESOLUTION, newResolution);
+                editor.putBoolean(PREF_TIMESTAMP, showTimestamp);
+                editor.apply();
+
+                // Update UI if resolution changed
+                if (newResolution != selectedResolutionIndex) {
+                    selectedResolutionIndex = newResolution;
+                    resolutionText.setText(RESOLUTIONS[selectedResolutionIndex]);
+
+                    // Restart camera with new resolution
+                    if (cameraProvider != null) {
+                        bindPreview(cameraProvider);
+                    }
                 }
 
                 Toast.makeText(MainActivity.this,
-                    "Resolution changed to " + RESOLUTIONS[selectedResolutionIndex],
-                    Toast.LENGTH_SHORT).show();
-
-                dialog.dismiss();
+                    "Settings updated", Toast.LENGTH_SHORT).show();
             }
         });
+
         builder.setNegativeButton("Cancel", null);
         builder.show();
     }

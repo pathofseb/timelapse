@@ -9,6 +9,7 @@ import android.graphics.Matrix;
 import android.media.ExifInterface;
 import android.media.MediaCodec;
 import android.media.MediaCodecInfo;
+import android.media.MediaExtractor;
 import android.media.MediaFormat;
 import android.media.MediaMuxer;
 import android.net.Uri;
@@ -34,6 +35,20 @@ public class VideoCompiler {
     private static final int I_FRAME_INTERVAL = 5;
     private static final int TIMEOUT_US = 10000;
 
+    // Overloaded method for segment compilation (does NOT save to gallery)
+    public String compileImagesToVideo(Context context, List<String> imagePaths, String outputDir, int segmentNumber) throws Exception {
+        if (imagePaths.isEmpty()) {
+            throw new IllegalArgumentException("No images to compile");
+        }
+
+        // Create segment file path
+        String segmentPath = outputDir + "/timelapse_segment_" + segmentNumber + ".mp4";
+        compileImagesToVideoFile(imagePaths, segmentPath);
+        Log.d(TAG, "Segment " + segmentNumber + " saved: " + segmentPath);
+        return segmentPath;
+    }
+
+    // Original method for final video compilation (saves to gallery)
     public String compileImagesToVideo(Context context, List<String> imagePaths, String outputDir) throws Exception {
         if (imagePaths.isEmpty()) {
             throw new IllegalArgumentException("No images to compile");
@@ -41,6 +56,26 @@ public class VideoCompiler {
 
         // Create temporary video file first
         String tempOutputPath = outputDir + "/timelapse_temp.mp4";
+        compileImagesToVideoFile(imagePaths, tempOutputPath);
+
+        Log.d(TAG, "Video compilation completed, saving to gallery...");
+
+        // Copy video to public gallery and get the final path
+        String finalPath = saveVideoToGallery(context, tempOutputPath);
+
+        // Delete temporary file
+        File tempFile = new File(tempOutputPath);
+        if (tempFile.exists()) {
+            tempFile.delete();
+            Log.d(TAG, "Temporary video file deleted");
+        }
+
+        Log.d(TAG, "Video saved to gallery: " + finalPath);
+        return finalPath;
+    }
+
+    // Core compilation method used by both segment and final compilation
+    private void compileImagesToVideoFile(List<String> imagePaths, String outputPath) throws Exception {
 
         // Read EXIF orientation from first image
         ExifInterface exif = new ExifInterface(imagePaths.get(0));
@@ -83,8 +118,8 @@ public class VideoCompiler {
             encoder.configure(format, null, null, MediaCodec.CONFIGURE_FLAG_ENCODE);
             encoder.start();
 
-            // Setup muxer with temporary file
-            muxer = new MediaMuxer(tempOutputPath, MediaMuxer.OutputFormat.MUXER_OUTPUT_MPEG_4);
+            // Setup muxer with output file
+            muxer = new MediaMuxer(outputPath, MediaMuxer.OutputFormat.MUXER_OUTPUT_MPEG_4);
 
             int trackIndex = -1;
             boolean muxerStarted = false;
@@ -168,20 +203,100 @@ public class VideoCompiler {
                 muxer.release();
             }
         }
+    }
 
-        Log.d(TAG, "Video compilation completed, saving to gallery...");
+    // Public method to save an existing video file to gallery
+    public String saveToGallery(Context context, String videoPath) throws Exception {
+        return saveVideoToGallery(context, videoPath);
+    }
 
-        // Copy video to public gallery and get the final path
-        String finalPath = saveVideoToGallery(context, tempOutputPath);
-
-        // Delete temporary file
-        File tempFile = new File(tempOutputPath);
-        if (tempFile.exists()) {
-            tempFile.delete();
-            Log.d(TAG, "Temporary video file deleted");
+    // Merge multiple video segments into one final video
+    public String mergeVideoSegments(Context context, List<String> segmentPaths, String outputDir) throws Exception {
+        if (segmentPaths.isEmpty()) {
+            throw new IllegalArgumentException("No segments to merge");
         }
 
-        Log.d(TAG, "Video saved to gallery: " + finalPath);
+        String mergedOutputPath = outputDir + "/timelapse_merged.mp4";
+        MediaMuxer muxer = null;
+
+        try {
+            // Get format from first segment
+            MediaExtractor extractor = new MediaExtractor();
+            extractor.setDataSource(segmentPaths.get(0));
+            MediaFormat format = null;
+            int videoTrackIndex = -1;
+
+            for (int i = 0; i < extractor.getTrackCount(); i++) {
+                MediaFormat fmt = extractor.getTrackFormat(i);
+                String mime = fmt.getString(MediaFormat.KEY_MIME);
+                if (mime.startsWith("video/")) {
+                    format = fmt;
+                    videoTrackIndex = i;
+                    break;
+                }
+            }
+            extractor.release();
+
+            if (format == null) {
+                throw new Exception("No video track found in segments");
+            }
+
+            // Create muxer
+            muxer = new MediaMuxer(mergedOutputPath, MediaMuxer.OutputFormat.MUXER_OUTPUT_MPEG_4);
+            int muxerTrackIndex = muxer.addTrack(format);
+            muxer.start();
+
+            // Merge all segments
+            ByteBuffer buffer = ByteBuffer.allocate(1024 * 1024); // 1MB buffer
+            MediaCodec.BufferInfo bufferInfo = new MediaCodec.BufferInfo();
+            long presentationTimeUs = 0;
+
+            for (String segmentPath : segmentPaths) {
+                Log.d(TAG, "Merging segment: " + segmentPath);
+                extractor = new MediaExtractor();
+                extractor.setDataSource(segmentPath);
+                extractor.selectTrack(0); // Video track
+
+                while (true) {
+                    buffer.clear();
+                    int sampleSize = extractor.readSampleData(buffer, 0);
+                    if (sampleSize < 0) {
+                        break;
+                    }
+
+                    bufferInfo.offset = 0;
+                    bufferInfo.size = sampleSize;
+                    bufferInfo.flags = extractor.getSampleFlags();
+                    bufferInfo.presentationTimeUs = presentationTimeUs;
+
+                    muxer.writeSampleData(muxerTrackIndex, buffer, bufferInfo);
+
+                    presentationTimeUs += 1000000L / FRAME_RATE; // Increment by frame duration
+                    extractor.advance();
+                }
+
+                extractor.release();
+            }
+
+        } finally {
+            if (muxer != null) {
+                muxer.stop();
+                muxer.release();
+            }
+        }
+
+        Log.d(TAG, "Segments merged, saving to gallery...");
+
+        // Save merged video to gallery
+        String finalPath = saveVideoToGallery(context, mergedOutputPath);
+
+        // Delete merged temp file
+        File mergedFile = new File(mergedOutputPath);
+        if (mergedFile.exists()) {
+            mergedFile.delete();
+            Log.d(TAG, "Merged temp file deleted");
+        }
+
         return finalPath;
     }
 
