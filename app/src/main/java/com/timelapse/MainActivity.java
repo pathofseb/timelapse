@@ -82,8 +82,11 @@ public class MainActivity extends AppCompatActivity {
     private int speedMultiplier = 10;
     private float originalBrightness = -1;
     private boolean screenIsDimmed = false;
+    private boolean previewDisabled = false;
     private Handler dimHandler = new Handler(Looper.getMainLooper());
     private static final long DIM_DELAY_MS = 10000; // 10 seconds
+    private static final long PREVIEW_DISABLE_DELAY_MS = 20000; // 20 seconds
+    private Preview preview;
 
     // Resolution settings
     private SharedPreferences preferences;
@@ -103,6 +106,15 @@ public class MainActivity extends AppCompatActivity {
         public void run() {
             if (isRecording && !screenIsDimmed) {
                 dimScreen();
+            }
+        }
+    };
+
+    private final Runnable disablePreviewRunnable = new Runnable() {
+        @Override
+        public void run() {
+            if (isRecording && !previewDisabled) {
+                disableCameraPreview();
             }
         }
     };
@@ -166,20 +178,29 @@ public class MainActivity extends AppCompatActivity {
         // Settings icon click listener
         settingsIcon.setOnClickListener(v -> showResolutionDialog());
 
-        // Set up touch listener for the entire view to handle touch-to-brighten
+        // Set up touch listener for the entire view to handle touch-to-brighten and re-enable preview
         View rootView = findViewById(android.R.id.content);
         rootView.setOnTouchListener(new View.OnTouchListener() {
             @Override
             public boolean onTouch(View v, MotionEvent event) {
-                if (event.getAction() == MotionEvent.ACTION_DOWN && isRecording && screenIsDimmed) {
-                    // Touch detected while recording and screen is dimmed - brighten it
-                    restoreScreenBrightness();
-                    screenIsDimmed = false;
+                if (event.getAction() == MotionEvent.ACTION_DOWN && isRecording) {
+                    if (screenIsDimmed || previewDisabled) {
+                        // Touch detected while recording and screen is dimmed/preview disabled
+                        restoreScreenBrightness();
+                        screenIsDimmed = false;
 
-                    // Schedule dimming again after 10 seconds
-                    scheduleDimming();
+                        // Re-enable preview if disabled
+                        if (previewDisabled) {
+                            enableCameraPreview();
+                            previewDisabled = false;
+                        }
 
-                    Toast.makeText(MainActivity.this, "Screen will dim again in 10 seconds", Toast.LENGTH_SHORT).show();
+                        // Schedule dimming and preview disable again
+                        scheduleDimming();
+                        schedulePreviewDisable();
+
+                        Toast.makeText(MainActivity.this, "Preview re-enabled", Toast.LENGTH_SHORT).show();
+                    }
                 }
                 return false; // Allow other touch events to be processed
             }
@@ -287,7 +308,7 @@ public class MainActivity extends AppCompatActivity {
     }
 
     private void bindPreview(@NonNull ProcessCameraProvider cameraProvider) {
-        Preview preview = new Preview.Builder().build();
+        preview = new Preview.Builder().build();
 
         // Calculate target resolution for portrait mode (9:16 aspect ratio)
         // RESOLUTION_HEIGHTS represents the WIDTH in portrait mode
@@ -336,12 +357,13 @@ public class MainActivity extends AppCompatActivity {
             isRecording = true;
             recordButton.setText(getString(R.string.stop_recording));
             recordButton.setBackgroundTintList(ContextCompat.getColorStateList(this, android.R.color.holo_green_dark));
-            statusText.setText("Recording at " + speedMultiplier + "x speed - " + RESOLUTIONS[selectedResolutionIndex] + "\nTouch to brighten • Power button to sleep");
+            statusText.setText("Recording at " + speedMultiplier + "x speed - " + RESOLUTIONS[selectedResolutionIndex] + "\nPreview will disable after 20s • Tap to re-enable");
             speedSeekBar.setEnabled(false);
             zoomSeekBar.setEnabled(false);
 
-            // Schedule screen dimming after 10 seconds
+            // Schedule screen dimming after 10 seconds and preview disable after 20 seconds
             scheduleDimming();
+            schedulePreviewDisable();
         } else {
             Toast.makeText(this, "Failed to start recording", Toast.LENGTH_SHORT).show();
         }
@@ -354,9 +376,17 @@ public class MainActivity extends AppCompatActivity {
         dimHandler.postDelayed(dimScreenRunnable, DIM_DELAY_MS);
     }
 
+    private void schedulePreviewDisable() {
+        // Cancel any pending preview disable
+        dimHandler.removeCallbacks(disablePreviewRunnable);
+        // Schedule preview disable after delay
+        dimHandler.postDelayed(disablePreviewRunnable, PREVIEW_DISABLE_DELAY_MS);
+    }
+
     private void stopRecording() {
-        // Cancel any pending dimming
+        // Cancel any pending dimming and preview disable
         dimHandler.removeCallbacks(dimScreenRunnable);
+        dimHandler.removeCallbacks(disablePreviewRunnable);
 
         statusText.setText(getString(R.string.processing));
         timeLapseService.stopRecording(new TimeLapseService.VideoCompletionCallback() {
@@ -371,9 +401,13 @@ public class MainActivity extends AppCompatActivity {
                     speedSeekBar.setEnabled(true);
                     zoomSeekBar.setEnabled(true);
 
-                    // Restore screen brightness
+                    // Restore screen brightness and preview
                     restoreScreenBrightness();
                     screenIsDimmed = false;
+                    if (previewDisabled) {
+                        enableCameraPreview();
+                        previewDisabled = false;
+                    }
                 });
             }
 
@@ -385,9 +419,13 @@ public class MainActivity extends AppCompatActivity {
                     speedSeekBar.setEnabled(true);
                     zoomSeekBar.setEnabled(true);
 
-                    // Restore screen brightness
+                    // Restore screen brightness and preview
                     restoreScreenBrightness();
                     screenIsDimmed = false;
+                    if (previewDisabled) {
+                        enableCameraPreview();
+                        previewDisabled = false;
+                    }
                 });
             }
         });
@@ -433,6 +471,34 @@ public class MainActivity extends AppCompatActivity {
         layoutParams.screenBrightness = originalBrightness;
         getWindow().setAttributes(layoutParams);
         Log.d("MainActivity", "Screen brightness restored");
+    }
+
+    private void disableCameraPreview() {
+        if (cameraProvider != null && preview != null) {
+            try {
+                // Unbind only the preview, keep imageCapture bound
+                cameraProvider.unbind(preview);
+                previewDisabled = true;
+                Log.d("MainActivity", "Camera preview disabled to save battery");
+            } catch (Exception e) {
+                Log.e("MainActivity", "Error disabling preview", e);
+            }
+        }
+    }
+
+    private void enableCameraPreview() {
+        if (cameraProvider != null && preview != null && previewDisabled) {
+            try {
+                // Re-bind the preview
+                CameraSelector cameraSelector = CameraSelector.DEFAULT_BACK_CAMERA;
+                preview.setSurfaceProvider(viewFinder.getSurfaceProvider());
+                cameraProvider.bindToLifecycle(this, cameraSelector, preview);
+                previewDisabled = false;
+                Log.d("MainActivity", "Camera preview re-enabled");
+            } catch (Exception e) {
+                Log.e("MainActivity", "Error enabling preview", e);
+            }
+        }
     }
 
     private void showResolutionDialog() {
@@ -522,6 +588,7 @@ public class MainActivity extends AppCompatActivity {
         super.onDestroy();
         // Clean up handler callbacks
         dimHandler.removeCallbacks(dimScreenRunnable);
+        dimHandler.removeCallbacks(disablePreviewRunnable);
 
         // Always unbind service on destroy to prevent leaks
         if (serviceBound) {
