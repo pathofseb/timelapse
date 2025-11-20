@@ -398,7 +398,7 @@ public class TimeLapseService extends Service {
             Canvas canvas = new Canvas(mutableBitmap);
 
             // Get current date and time
-            SimpleDateFormat dateFormat = new SimpleDateFormat("yyyy-MM-dd", Locale.getDefault());
+            SimpleDateFormat dateFormat = new SimpleDateFormat("dd-MM-yyyy", Locale.getDefault());
             SimpleDateFormat timeFormat = new SimpleDateFormat("HH:mm:ss", Locale.getDefault());
             Date now = new Date();
             String dateStr = dateFormat.format(now);
