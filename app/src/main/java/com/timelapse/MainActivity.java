@@ -256,10 +256,32 @@ public class MainActivity extends AppCompatActivity {
             }
         });
 
-        // Add pinch to zoom to preview
+        // Add pinch to zoom to preview and handle screen wake-up
         viewFinder.setOnTouchListener(new View.OnTouchListener() {
             @Override
             public boolean onTouch(View v, MotionEvent event) {
+                // Handle screen brightening and preview re-enabling when recording
+                if (event.getAction() == MotionEvent.ACTION_DOWN && isRecording) {
+                    if (screenIsDimmed || previewDisabled) {
+                        // Touch detected while recording and screen is dimmed/preview disabled
+                        restoreScreenBrightness();
+                        screenIsDimmed = false;
+
+                        // Re-enable preview if disabled
+                        if (previewDisabled) {
+                            enableCameraPreview();
+                            previewDisabled = false;
+                        }
+
+                        // Schedule dimming and preview disable again
+                        scheduleDimming();
+                        schedulePreviewDisable();
+
+                        Toast.makeText(MainActivity.this, "Preview re-enabled", Toast.LENGTH_SHORT).show();
+                    }
+                }
+
+                // Handle pinch-to-zoom
                 scaleGestureDetector.onTouchEvent(event);
                 return true;
             }
